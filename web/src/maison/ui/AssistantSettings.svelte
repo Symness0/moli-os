@@ -236,7 +236,7 @@
         <b>{t('moli.reglages.titre')}</b>
         <span class="muted">
           {#if s.provider === 'codex' && s.codex}
-            {t('moli.reglages.codex_ok')}
+            {t('moli.reglages.codex_ok', { model: s.codex_model })}
           {:else if s.provider === 'api_key' && s.key}
             {t('moli.reglages.cle_ok')}
           {:else if s.provider === 'local' || (s.local_model && !s.key && !s.codex)}

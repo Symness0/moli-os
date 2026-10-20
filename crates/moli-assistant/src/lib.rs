@@ -60,6 +60,9 @@ pub struct Config {
     pub base_url: String,
     #[serde(default = "default_model")]
     pub model: String,
+    /// Model used with ChatGPT Codex OAuth (its catalog differs from API keys).
+    #[serde(default = "default_codex_model")]
+    pub codex_model: String,
     /// For drafting automations: rare, so a stronger model is affordable.
     #[serde(default = "default_builder")]
     pub builder_model: String,
@@ -113,6 +116,7 @@ impl Default for Config {
         Self {
             base_url: default_base_url(),
             model: default_model(),
+            codex_model: default_codex_model(),
             builder_model: default_builder(),
             transcribe_model: default_transcribe(),
             speech_model: default_speech_model(),
@@ -138,6 +142,10 @@ fn default_base_url() -> String {
 
 fn default_model() -> String {
     "gpt-4.1-mini".into()
+}
+
+fn default_codex_model() -> String {
+    "gpt-6-luna".into()
 }
 
 fn default_transcribe() -> String {
@@ -371,6 +379,10 @@ impl Assistant {
         let codex_endpoint = codex::endpoint()?;
         let tz = jiff::tz::TimeZone::get(&config.timezone)?;
         anyhow::ensure!(
+            !config.codex_model.trim().is_empty(),
+            "codex_model must not be empty"
+        );
+        anyhow::ensure!(
             (0.25..=4.0).contains(&config.speech_speed),
             "speech_speed must be between 0.25 and 4"
         );
@@ -430,7 +442,16 @@ impl Assistant {
     pub(crate) async fn complete_chat(&self, body: &Json) -> Result<Json, AssistantError> {
         let auth = self.auth_for_request().await?;
         if auth.is_codex() {
-            let responses = responses_request(body);
+            let model = &self.0.config.codex_model;
+            let mut codex_body = body.clone();
+            codex_body["model"] = json!(model);
+            if is_reasoning(model) {
+                if let Some(body) = codex_body.as_object_mut() {
+                    body.remove("temperature");
+                }
+                codex_body["reasoning_effort"] = json!("low");
+            }
+            let responses = responses_request(&codex_body);
             let request_auth = auth.request_auth();
             let answer = self
                 .0
@@ -461,6 +482,11 @@ impl Assistant {
     pub fn status(&self) -> Json {
         let ready = self.key().is_ok();
         let c = &self.0.config;
+        let model = if self.provider_mode() == "codex" {
+            &c.codex_model
+        } else {
+            &c.model
+        };
         let audio_cloud_ready = self.0.endpoint.is_local() || self.api_key().is_some();
         let cloud_listen = audio_cloud_ready && !c.transcribe_model.is_empty();
         let local_listen = voice::host_port(&c.local_listen).is_some();
@@ -468,7 +494,7 @@ impl Assistant {
         let local_voice = voice::host_port(&c.local_speech).is_some();
         json!({
             "ready": ready,
-            "model": c.model,
+            "model": model,
             "provider": self.provider_mode(),
             "listen": ready && (cloud_listen || local_listen),
             "speak": ready && (cloud_voice || local_voice),
@@ -1098,7 +1124,11 @@ impl Assistant {
             reply,
             cards: run.cards,
             actions: run.actions,
-            model: self.0.config.model.clone(),
+            model: if self.provider_mode() == "codex" {
+                self.0.config.codex_model.clone()
+            } else {
+                self.0.config.model.clone()
+            },
             usage: run.usage,
             end: run.end,
             tools: run.tools,
@@ -1162,10 +1192,15 @@ impl Assistant {
         }
         run.searches += 1;
         let c = &self.0.config;
+        let model = if auth.is_codex() {
+            &c.codex_model
+        } else {
+            &c.search_model
+        };
         match outside::search(
             endpoint,
             &request_auth,
-            &c.search_model,
+            model,
             &c.timezone,
             query,
         )
@@ -1174,7 +1209,7 @@ impl Assistant {
             Ok((found, usage)) => {
                 run.search_cost += pricing::SEARCH
                     + pricing::think(
-                        &c.search_model,
+                        model,
                         usage["input_tokens"].as_u64().unwrap_or(0),
                         usage["input_tokens_details"]["cached_tokens"]
                             .as_u64()
@@ -1558,6 +1593,7 @@ fn trim_filler_with(text: &str, cards: bool, list: &dyn Fn(&str) -> Vec<String>)
 fn is_reasoning(model: &str) -> bool {
     let m = model.rsplit('/').next().unwrap_or(model).to_lowercase();
     m.starts_with("gpt-5")
+        || m.starts_with("gpt-6")
         || (m.starts_with('o') && m[1..].starts_with(|c: char| c.is_ascii_digit()))
 }
 

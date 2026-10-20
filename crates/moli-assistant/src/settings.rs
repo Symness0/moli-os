@@ -162,6 +162,7 @@ impl Assistant {
             "provider": self.provider_mode(),
             "local_model": self.0.endpoint.is_local(),
             "model": c.model,
+            "codex_model": c.codex_model,
             "cloud_voice": !c.speech_model.is_empty(),
             "local_voice": crate::voice::host_port(&c.local_speech).is_some(),
             "voice": voice,
