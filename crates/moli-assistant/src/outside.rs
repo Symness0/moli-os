@@ -9,7 +9,7 @@ use http_body_util::Full;
 use moli_net::Body as Bytes;
 use serde_json::{Value as Json, json};
 
-use crate::llm::Endpoint;
+use crate::llm::{Endpoint, RequestAuth};
 
 const FORECAST_HOST: &str = "api.open-meteo.com";
 const FORECAST_LIMIT: Duration = Duration::from_secs(10);
@@ -105,13 +105,13 @@ fn sky(code: Option<u64>) -> String {
 /// search model used (`input_tokens`, `output_tokens`…, for the cost).
 pub(crate) async fn search(
     endpoint: &Endpoint,
-    key: Option<&str>,
+    auth: &RequestAuth<'_>,
     model: &str,
     timezone: &str,
     query: &str,
 ) -> anyhow::Result<(Json, Json)> {
     let body = request(model, timezone, query);
-    let answer = endpoint.respond(key, &body).await?;
+    let answer = endpoint.respond_with_auth(auth, &body).await?;
     let text = output_text(&answer);
     anyhow::ensure!(!text.is_empty(), "the search gave no answer");
     Ok((json!({ "answer": text }), answer["usage"].clone()))
