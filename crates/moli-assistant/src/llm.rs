@@ -315,16 +315,12 @@ impl Endpoint {
                 auth,
                 "/responses",
                 "application/json",
-                "application/json",
+                "text/event-stream",
                 body.to_string().into_bytes(),
                 CHAT_LIMIT,
             )
             .await?;
-        let json: Json = serde_json::from_slice(&answer).unwrap_or(Json::Null);
-        if json.is_null() {
-            bail!("{}: the answer is not JSON", self.host);
-        }
-        Ok(json)
+        completed_response(&self.host, &answer)
     }
 
     /// A small, bounded POST for the fixed OAuth endpoints used by Codex.
@@ -400,6 +396,59 @@ impl Endpoint {
             .trim()
             .to_owned())
     }
+}
+
+/// Codex requires Responses requests to stream. The body is buffered under
+/// `MAX_ANSWER`, then reduced to the completed response for the existing
+/// deterministic tool loop.
+fn completed_response(host: &str, answer: &[u8]) -> anyhow::Result<Json> {
+    let text = String::from_utf8_lossy(answer);
+    let mut data = String::new();
+    let mut response = None;
+
+    for line in text.lines().chain(std::iter::once("")) {
+        if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.strip_prefix(' ').unwrap_or(value));
+        } else if line.is_empty() && !data.is_empty() {
+            if data == "[DONE]" {
+                data.clear();
+                continue;
+            }
+            let event: Json = serde_json::from_str(&data)
+                .with_context(|| format!("{host}: invalid Codex stream event"))?;
+            data.clear();
+
+            match event["type"].as_str() {
+                Some("response.completed" | "response.incomplete" | "response.done") => {
+                    let result = event.get("response").cloned().unwrap_or_else(|| {
+                        if event.get("output").is_some() {
+                            event.clone()
+                        } else {
+                            Json::Null
+                        }
+                    });
+                    if !result.is_null() {
+                        response = Some(result);
+                    }
+                }
+                Some("response.failed" | "error") => {
+                    let message = event
+                        .pointer("/response/error/message")
+                        .or_else(|| event.pointer("/error/message"))
+                        .or_else(|| event.get("message"))
+                        .and_then(Json::as_str)
+                        .unwrap_or("Codex stream failed");
+                    bail!("{host}: {message}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    response.ok_or_else(|| anyhow::anyhow!("{host}: Codex stream ended without a response"))
 }
 
 /// The body of a speech request; `format` as the provider names it.
