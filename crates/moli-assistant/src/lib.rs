@@ -7,13 +7,14 @@
 //! decides what the screen shows (`show`): the answer is a few words and
 //! the right controls, not a wall of text.
 //!
-//! The model never sees camera images, and never sees a secret: the API key
-//! lives in the encrypted store (`moli-os secrets set assistant api_key`).
+//! The model never sees camera images, and never sees a secret: API keys and
+//! ChatGPT Codex OAuth tokens live in the encrypted store.
 
 // The automation draft schema is one big `json!`.
 #![recursion_limit = "256"]
 
 mod auto;
+mod codex;
 mod door;
 mod exchanges;
 mod house;
@@ -46,6 +47,7 @@ use moli_runtime::{CommandError, Hub};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 
+use crate::codex::LoginState;
 use crate::house::{Layout, name_of};
 use crate::llm::Endpoint;
 
@@ -106,7 +108,7 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// No `[assistant]` in moli.toml: Moli is there anyway, waiting for a key.
+    /// No `[assistant]` in moli.toml: Moli is there anyway, waiting for a provider.
     fn default() -> Self {
         Self {
             base_url: default_base_url(),
@@ -216,7 +218,10 @@ struct Inner {
     layout_path: Option<PathBuf>,
     config: Config,
     endpoint: Endpoint,
+    codex_endpoint: Endpoint,
     tz: jiff::tz::TimeZone,
+    codex_login: tokio::sync::Mutex<LoginState>,
+    codex_refresh: tokio::sync::Mutex<()>,
     running: tokio::sync::Semaphore,
     recent: Mutex<VecDeque<Instant>>,
     /// The voice has its own budget: three calls per exchange would eat
@@ -363,6 +368,7 @@ impl Assistant {
         config: Config,
     ) -> anyhow::Result<Self> {
         let endpoint = Endpoint::parse(&config.base_url)?;
+        let codex_endpoint = codex::endpoint()?;
         let tz = jiff::tz::TimeZone::get(&config.timezone)?;
         anyhow::ensure!(
             (0.25..=4.0).contains(&config.speech_speed),
@@ -375,7 +381,10 @@ impl Assistant {
             layout_path,
             config,
             endpoint,
+            codex_endpoint,
             tz,
+            codex_login: tokio::sync::Mutex::new(LoginState::default()),
+            codex_refresh: tokio::sync::Mutex::new(()),
             running: tokio::sync::Semaphore::new(2),
             recent: Mutex::new(VecDeque::new()),
             voice_running: tokio::sync::Semaphore::new(3),
@@ -393,26 +402,74 @@ impl Assistant {
     }
 
     fn key(&self) -> Result<Option<String>, AssistantError> {
-        let key = self.0.hub.secret(&InstanceId::from("assistant"), "api_key");
+        let key = self.api_key();
+        if self.provider_mode() == "codex" {
+            return if self.codex_connected() {
+                Ok(None)
+            } else {
+                Err(AssistantError::NotConfigured(moli_i18n::tr!(
+                    "assistant.settings.codex_reconnect"
+                )))
+            };
+        }
         if key.is_none() && !self.0.endpoint.is_local() {
-            return Err(AssistantError::NotConfigured(
-                "no API key: pipe it into `moli-os secrets set assistant api_key`".into(),
-            ));
+            return Err(AssistantError::NotConfigured(moli_i18n::tr!(
+                "assistant.settings.key_missing"
+            )));
         }
         Ok(key)
+    }
+
+    fn api_key(&self) -> Option<String> {
+        self.0.hub.secret(&InstanceId::from("assistant"), "api_key")
+    }
+
+    /// One model call using the active provider. Codex uses Responses; its
+    /// result is normalized for the existing deterministic tool and draft
+    /// handlers.
+    pub(crate) async fn complete_chat(&self, body: &Json) -> Result<Json, AssistantError> {
+        let auth = self.auth_for_request().await?;
+        if auth.is_codex() {
+            let responses = responses_request(body);
+            let request_auth = auth.request_auth();
+            let answer = self
+                .0
+                .codex_endpoint
+                .respond_with_auth(&request_auth, &responses)
+                .await
+                .map_err(|e| AssistantError::Upstream(e.to_string()))?;
+            let message = responses_message(&answer);
+            return Ok(json!({
+                "choices": [{ "message": message }],
+                "usage": {
+                    "prompt_tokens": answer["usage"]["input_tokens"],
+                    "completion_tokens": answer["usage"]["output_tokens"],
+                    "prompt_tokens_details": {
+                        "cached_tokens": answer["usage"]["input_tokens_details"]["cached_tokens"],
+                    },
+                },
+            }));
+        }
+        self.0
+            .endpoint
+            .chat(auth.api_key(), body)
+            .await
+            .map_err(|e| AssistantError::Upstream(e.to_string()))
     }
 
     /// What the dashboard needs to know before offering a conversation.
     pub fn status(&self) -> Json {
         let ready = self.key().is_ok();
         let c = &self.0.config;
-        let cloud_listen = ready && !c.transcribe_model.is_empty();
+        let audio_cloud_ready = self.0.endpoint.is_local() || self.api_key().is_some();
+        let cloud_listen = audio_cloud_ready && !c.transcribe_model.is_empty();
         let local_listen = voice::host_port(&c.local_listen).is_some();
-        let cloud_voice = ready && !c.speech_model.is_empty();
+        let cloud_voice = audio_cloud_ready && !c.speech_model.is_empty();
         let local_voice = voice::host_port(&c.local_speech).is_some();
         json!({
             "ready": ready,
             "model": c.model,
+            "provider": self.provider_mode(),
             "listen": ready && (cloud_listen || local_listen),
             "speak": ready && (cloud_voice || local_voice),
             "voices": { "cloud": cloud_voice, "local": local_voice },
@@ -457,28 +514,26 @@ impl Assistant {
             return Err(AssistantError::Invalid("recording too short".into()));
         }
         let mut failure = None;
-        if !c.transcribe_model.is_empty() {
-            match self.key() {
-                Ok(key) => match self
-                    .0
-                    .endpoint
-                    .transcribe(key.as_deref(), &c.transcribe_model, audio, mime)
-                    .await
-                {
-                    Ok(text) => {
-                        tracing::info!(engine = "cloud", bytes = audio.len(), "voice heard");
-                        self.note_heard(voice::seconds_of(audio, mime), None);
-                        return Ok(Heard {
-                            text,
-                            engine: "cloud",
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "cloud transcription failed, trying the local one");
-                        failure = Some(AssistantError::Upstream(e.to_string()));
-                    }
-                },
-                Err(e) => failure = Some(e),
+        let api_key = self.api_key();
+        if !c.transcribe_model.is_empty() && (self.0.endpoint.is_local() || api_key.is_some()) {
+            match self
+                .0
+                .endpoint
+                .transcribe(api_key.as_deref(), &c.transcribe_model, audio, mime)
+                .await
+            {
+                Ok(text) => {
+                    tracing::info!(engine = "cloud", bytes = audio.len(), "voice heard");
+                    self.note_heard(voice::seconds_of(audio, mime), None);
+                    return Ok(Heard {
+                        text,
+                        engine: "cloud",
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "cloud transcription failed, trying the local one");
+                    failure = Some(AssistantError::Upstream(e.to_string()));
+                }
             }
         }
         if let (Some((host, port)), Some((rate, pcm))) = (local, voice::pcm_of(audio)) {
@@ -543,7 +598,7 @@ impl Assistant {
             0,
         )?;
         let c = &self.0.config;
-        let key = self.key().ok();
+        let key = self.api_key();
         let (chosen, style) = self.voice_and_style();
         let voices = voice::Voices {
             cloud: match &key {
@@ -590,14 +645,20 @@ impl Assistant {
             .map(|m| m.content.clone());
         let surface = turn.surface.clone().unwrap_or_default();
         let spoken = turn.spoken;
+        let codex_plan = self.provider_mode() == "codex";
+        let cloud_audio_api = !self.0.endpoint.is_local() && self.api_key().is_some();
         let result = self.converse(turn).await;
         if let Some(question) = question {
             let heard = self.take_heard();
             let c = &self.0.config;
             let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let hear = heard
-                .as_ref()
-                .map_or(0.0, |h| pricing::hear(&c.transcribe_model, h.seconds));
+            let hear = heard.as_ref().map_or(0.0, |h| {
+                if cloud_audio_api {
+                    pricing::hear(&c.transcribe_model, h.seconds)
+                } else {
+                    0.0
+                }
+            });
             let (kind, reply, tools, orders, cost) = match &result {
                 Ok(r) => (
                     exchanges::Kind::Turn,
@@ -611,19 +672,23 @@ impl Assistant {
                         })
                         .collect(),
                     exchanges::Cost::new(
-                        pricing::think(
-                            &c.model,
-                            r.usage.prompt_tokens,
-                            r.usage.cached_tokens,
-                            r.usage.completion_tokens,
-                        ) + r.draft_cost,
+                        if codex_plan {
+                            0.0
+                        } else {
+                            pricing::think(
+                                &c.model,
+                                r.usage.prompt_tokens,
+                                r.usage.cached_tokens,
+                                r.usage.completion_tokens,
+                            ) + r.draft_cost
+                        },
                         hear,
-                        if spoken {
+                        if spoken && cloud_audio_api {
                             pricing::speak(&c.speech_model, r.reply.chars().count())
                         } else {
                             0.0
                         },
-                        r.search_cost,
+                        if codex_plan { 0.0 } else { r.search_cost },
                     ),
                 ),
                 Err(e) => (
@@ -840,7 +905,6 @@ impl Assistant {
                 "the last message must be the user's".into(),
             ));
         }
-        let key = self.key()?;
         let _permit = self.admit()?;
         let layout = Layout::load(self.0.layout_path.as_deref()).await;
         let page = turn.surface.as_deref() == Some("page");
@@ -904,12 +968,7 @@ impl Assistant {
             if step + 1 == MAX_STEPS {
                 body["tool_choice"] = json!("none");
             }
-            let answer = self
-                .0
-                .endpoint
-                .chat(key.as_deref(), &body)
-                .await
-                .map_err(|e| AssistantError::Upstream(e.to_string()))?;
+            let answer = self.complete_chat(&body).await?;
             run.usage.steps = step + 1;
             run.usage.prompt_tokens += answer["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
             run.usage.completion_tokens +=
@@ -917,11 +976,11 @@ impl Assistant {
             run.usage.cached_tokens += answer["usage"]["prompt_tokens_details"]["cached_tokens"]
                 .as_u64()
                 .unwrap_or(0);
-            let message = &answer["choices"][0]["message"];
+            let message = answer["choices"][0]["message"].clone();
             let calls = message["tool_calls"].as_array().filter(|c| !c.is_empty());
             if let Some(calls) = calls {
                 if let Some(said) = self
-                    .act(message, calls, &layout, &mut run, &mut messages)
+                    .act(&message, calls, &layout, &mut run, &mut messages)
                     .await
                 {
                     return Ok(self.finish(&said, run, &layout, &question));
@@ -1066,7 +1125,8 @@ impl Assistant {
 
     /// The web is searched only through the provider (never a local model).
     fn searches(&self) -> bool {
-        !self.0.config.search_model.is_empty() && !self.0.endpoint.is_local()
+        !self.0.config.search_model.is_empty()
+            && (!self.0.endpoint.is_local() || self.provider_mode() == "codex")
     }
 
     /// Models believe they cannot read the news: told otherwise when they can.
@@ -1087,9 +1147,15 @@ impl Assistant {
         else {
             return json!({ "error": "query is required" });
         };
-        let key = match self.key() {
-            Ok(key) => key,
+        let auth = match self.auth_for_request().await {
+            Ok(auth) => auth,
             Err(e) => return json!({ "error": e.to_string() }),
+        };
+        let request_auth = auth.request_auth();
+        let endpoint = if auth.is_codex() {
+            &self.0.codex_endpoint
+        } else {
+            &self.0.endpoint
         };
         if run.searches == MAX_SEARCHES {
             return over_budget("web_search", MAX_SEARCHES);
@@ -1097,8 +1163,8 @@ impl Assistant {
         run.searches += 1;
         let c = &self.0.config;
         match outside::search(
-            &self.0.endpoint,
-            key.as_deref(),
+            endpoint,
+            &request_auth,
             &c.search_model,
             &c.timezone,
             query,
@@ -1506,6 +1572,147 @@ fn takes_temperature(model: &str) -> bool {
         .unwrap_or(model)
         .to_lowercase()
         .starts_with("claude")
+}
+
+/// Translate Moli's provider-neutral conversation history into the Responses
+/// API shape used by ChatGPT Codex.
+fn responses_request(chat: &Json) -> Json {
+    let mut instructions = Vec::new();
+    let mut input = Vec::new();
+    if let Some(messages) = chat["messages"].as_array() {
+        for message in messages {
+            let role = message["role"].as_str().unwrap_or_default();
+            let content = message["content"].as_str().unwrap_or_default();
+            match role {
+                "system" => instructions.push(content),
+                "user" => input.push(json!({
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": content }],
+                })),
+                "assistant" => {
+                    if !content.is_empty() {
+                        input.push(json!({
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": content }],
+                        }));
+                    }
+                    if let Some(calls) = message["tool_calls"].as_array() {
+                        for call in calls {
+                            input.push(json!({
+                                "type": "function_call",
+                                "call_id": call["id"],
+                                "name": call["function"]["name"],
+                                "arguments": call["function"]["arguments"],
+                            }));
+                        }
+                    }
+                }
+                "tool" => input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": message["tool_call_id"],
+                    "output": content,
+                })),
+                _ => {}
+            }
+        }
+    }
+
+    let tools = chat["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            let function = &tool["function"];
+            let name = function["name"].as_str()?;
+            let mut converted = json!({
+                "type": "function",
+                "name": name,
+                "parameters": function["parameters"].clone(),
+            });
+            if let Some(description) = function["description"].as_str() {
+                converted["description"] = json!(description);
+            }
+            if let Some(strict) = function["strict"].as_bool() {
+                converted["strict"] = json!(strict);
+            }
+            Some(converted)
+        })
+        .collect::<Vec<_>>();
+
+    let mut request = json!({
+        "model": chat["model"],
+        "instructions": instructions.join("\n\n"),
+        "input": input,
+        "tools": tools,
+        "store": false,
+        "stream": false,
+    });
+    if let Some(tokens) = chat["max_completion_tokens"].as_u64().or_else(|| chat["max_tokens"].as_u64()) {
+        request["max_output_tokens"] = json!(tokens);
+    }
+    if let Some(effort) = chat["reasoning_effort"].as_str() {
+        request["reasoning"] = json!({ "effort": effort });
+    }
+    if let Some(temperature) = chat["temperature"].as_f64() {
+        request["temperature"] = json!(temperature);
+    }
+    if chat["response_format"]["type"] == "json_schema" {
+        let schema = &chat["response_format"]["json_schema"];
+        request["text"] = json!({
+            "format": {
+                "type": "json_schema",
+                "name": schema["name"],
+                "strict": schema["strict"],
+                "schema": schema["schema"],
+            }
+        });
+    }
+    if !chat["tool_choice"].is_null() {
+        request["tool_choice"] = chat["tool_choice"].clone();
+    }
+    request
+}
+
+/// Normalize a Responses API result so the existing, guarded tool runner can
+/// handle it exactly like a Chat Completions result.
+fn responses_message(answer: &Json) -> Json {
+    let mut text = Vec::new();
+    let mut calls = Vec::new();
+    if let Some(output) = answer["output"].as_array() {
+        for item in output {
+            match item["type"].as_str() {
+                Some("message") => {
+                    for part in item["content"].as_array().into_iter().flatten() {
+                        if part["type"] == "output_text"
+                            && let Some(value) = part["text"].as_str()
+                        {
+                            text.push(value);
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    let arguments = item["arguments"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| item["arguments"].to_string());
+                    calls.push(json!({
+                        "id": item["call_id"].as_str().or_else(|| item["id"].as_str()).unwrap_or("codex_call"),
+                        "type": "function",
+                        "function": {
+                            "name": item["name"],
+                            "arguments": arguments,
+                        },
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    json!({
+        "role": "assistant",
+        "content": text.join(" "),
+        "tool_calls": calls,
+    })
 }
 
 fn strip_calls(text: &str) -> String {
