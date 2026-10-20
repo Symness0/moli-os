@@ -1666,7 +1666,7 @@ fn responses_request(chat: &Json) -> Json {
         "input": input,
         "tools": tools,
         "store": false,
-        "stream": false,
+        "stream": true,
     });
     if let Some(tokens) = chat["max_completion_tokens"].as_u64().or_else(|| chat["max_tokens"].as_u64()) {
         request["max_output_tokens"] = json!(tokens);
