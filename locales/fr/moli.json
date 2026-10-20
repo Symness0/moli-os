@@ -99,7 +99,7 @@
   "moli.reglages.local": "Modèle local ({model}) : pas de clé nécessaire.",
   "moli.reglages.cle_ok": "Clé OpenAI enregistrée (chiffrée dans Moli). Environ un demi-centime par échange.",
   "moli.reglages.cle_manque": "Pour parler avec Moli, ajoute une clé API OpenAI ou connecte ChatGPT Codex.",
-  "moli.reglages.codex_ok": "ChatGPT Codex connecté (usage inclus dans ton offre ChatGPT).",
+  "moli.reglages.codex_ok": "ChatGPT Codex actif · {model} (usage inclus dans ton offre ChatGPT).",
   "moli.reglages.codex_connecte": "Compte ChatGPT Codex connecté, mais pas sélectionné.",
   "moli.reglages.codex_manque": "Connexion ChatGPT Codex non configurée.",
   "moli.reglages.codex_connecter": "Connecter ChatGPT Codex",

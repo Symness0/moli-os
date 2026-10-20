@@ -13,7 +13,8 @@ consigne d'un nœud « Moli écrit » (`house::private`) ; il lit `home`, `zone`
 
 ```toml
 [assistant]
-model = "gpt-4.1-mini"                 # la conversation
+model = "gpt-4.1-mini"                 # conversation avec une clé API
+codex_model = "gpt-6-luna"             # modèle économique pour ChatGPT Codex
 builder_model = "gpt-4.1"              # dessiner des automatismes (rare, donc un modèle plus fort)
 transcribe_model = "gpt-4o-mini-transcribe"   # voix → texte ; "" = pas de voix
 # base_url = "https://api.openai.com/v1"      # http://… pour un modèle local (pas de clé exigée)
@@ -26,13 +27,17 @@ Deux connexions sont possibles. La **clé API OpenAI** se range avec
 https : un `base_url` en `http://` ne la reçoit jamais, même rangée dans le coffre.
 La **connexion ChatGPT Codex** se fait depuis Système → Moli : une personne ouvre la page
 de connexion OpenAI, saisit le code à usage unique et revient au dashboard. Moli utilise
-ensuite le modèle choisi dans `model` et l'API Responses de Codex. Les jetons d'accès et de
-renouvellement restent dans le coffre chiffré (`assistant/codex_tokens`) et sont renouvelés
-par Moli ; ils ne sont jamais renvoyés au navigateur. La connexion sélectionnée est gardée
-dans le coffre (`assistant/auth_mode`). Les appels Moli passent par l'offre ChatGPT/Codex du
-compte ; les appels avec une clé API restent facturés au compte API OpenAI.
+`codex_model` avec l'API Responses de Codex. Sa valeur par défaut est `gpt-6-luna`, le modèle
+GPT-6 le plus économique, disponible dans Codex selon l'offre et le déploiement du compte
+([modèles et disponibilité](https://help.openai.com/en/articles/20001354-gpt-6-and-other-models-in-chatgpt)).
+OpenAI a retiré GPT-5.4 de Codex avec connexion ChatGPT le 31 août 2026. Ce réglage indépendant
+évite d'envoyer à Codex les modèles configurés pour l'API, comme `gpt-4.1-mini`. Les jetons
+d'accès et de renouvellement restent dans le coffre chiffré (`assistant/codex_tokens`) et sont
+renouvelés par Moli ; ils ne sont jamais renvoyés au navigateur. La connexion sélectionnée
+est gardée dans le coffre (`assistant/auth_mode`). Les appels Moli passent par l'offre
+ChatGPT/Codex du compte ; les appels avec une clé API restent facturés au compte API OpenAI.
 
-Les modèles « à raisonnement » (gpt-5…, o…) sont reconnus (`max_completion_tokens`,
+Les modèles « à raisonnement » (gpt-5…, gpt-6…, o…) sont reconnus (`max_completion_tokens`,
 `reasoning_effort: low`, pas de température). La voix cloud et la transcription cloud
 continuent à utiliser une clé API ; sans clé, Moli garde les voix locales configurées.
 

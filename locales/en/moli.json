@@ -99,7 +99,7 @@
   "moli.reglages.local": "Local model ({model}): no key needed.",
   "moli.reglages.cle_ok": "OpenAI key saved (encrypted inside Moli). Roughly half a cent per exchange.",
   "moli.reglages.cle_manque": "To talk with Moli, add an OpenAI API key or connect ChatGPT Codex.",
-  "moli.reglages.codex_ok": "ChatGPT Codex connected (usage included with your ChatGPT plan).",
+  "moli.reglages.codex_ok": "ChatGPT Codex active · {model} (usage included with your ChatGPT plan).",
   "moli.reglages.codex_connecte": "ChatGPT Codex account connected, but not selected.",
   "moli.reglages.codex_manque": "ChatGPT Codex sign-in is not configured.",
   "moli.reglages.codex_connecter": "Connect ChatGPT Codex",
