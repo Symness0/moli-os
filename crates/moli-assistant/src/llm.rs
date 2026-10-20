@@ -118,7 +118,7 @@ impl Endpoint {
                         .header("authorization", format!("Bearer {access_token}"))
                         .header("originator", "codex_cli_rs");
                     if let Some(account_id) = account_id {
-                        builder = builder.header("ChatGPT-Account-ID", account_id);
+                        builder = builder.header("ChatGPT-Account-ID", *account_id);
                     }
                 }
             }

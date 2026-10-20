@@ -604,7 +604,7 @@ impl Assistant {
             cloud: match &key {
                 Some(key) if !c.speech_model.is_empty() => Some(voice::Cloud {
                     endpoint: &self.0.endpoint,
-                    key: key.as_deref(),
+                    key: Some(key.as_str()),
                     model: &c.speech_model,
                     voice: voice.unwrap_or(&chosen),
                     style: &style,
