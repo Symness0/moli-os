@@ -254,6 +254,9 @@
       {#if s.codex && s.provider !== 'codex'}
         <button class="btn" disabled={providerBusy} onclick={() => chooseProvider('codex')}>{t('moli.reglages.auth_codex')}</button>
       {/if}
+      {#if s.local_model && s.provider !== 'local'}
+        <button class="btn" disabled={providerBusy} onclick={() => chooseProvider('local')}>{t('moli.reglages.auth_local')}</button>
+      {/if}
       {#if !s.local_model}
         <button class="btn" onclick={() => (open = !open)}>{s.key ? t('moli.reglages.remplacer') : t('moli.reglages.ajouter')}</button>
       {/if}

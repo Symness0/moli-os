@@ -627,16 +627,17 @@ impl Assistant {
         let key = self.api_key();
         let (chosen, style) = self.voice_and_style();
         let voices = voice::Voices {
-            cloud: match &key {
-                Some(key) if !c.speech_model.is_empty() => Some(voice::Cloud {
+            cloud: if !c.speech_model.is_empty() && (self.0.endpoint.is_local() || key.is_some()) {
+                Some(voice::Cloud {
                     endpoint: &self.0.endpoint,
-                    key: Some(key.as_str()),
+                    key: key.as_deref(),
                     model: &c.speech_model,
                     voice: voice.unwrap_or(&chosen),
                     style: &style,
                     speed: self.speed(),
-                }),
-                _ => None,
+                })
+            } else {
+                None
             },
             local: voice::host_port(&c.local_speech),
             local_voice: Some(c.local_voice.as_str()).filter(|v| !v.is_empty()),
@@ -1197,15 +1198,7 @@ impl Assistant {
         } else {
             &c.search_model
         };
-        match outside::search(
-            endpoint,
-            &request_auth,
-            model,
-            &c.timezone,
-            query,
-        )
-        .await
-        {
+        match outside::search(endpoint, &request_auth, model, &c.timezone, query).await {
             Ok((found, usage)) => {
                 run.search_cost += pricing::SEARCH
                     + pricing::think(
@@ -1683,7 +1676,10 @@ fn responses_request(chat: &Json) -> Json {
         "store": false,
         "stream": true,
     });
-    if let Some(tokens) = chat["max_completion_tokens"].as_u64().or_else(|| chat["max_tokens"].as_u64()) {
+    if let Some(tokens) = chat["max_completion_tokens"]
+        .as_u64()
+        .or_else(|| chat["max_tokens"].as_u64())
+    {
         request["max_output_tokens"] = json!(tokens);
     }
     if let Some(effort) = chat["reasoning_effort"].as_str() {
@@ -1729,8 +1725,7 @@ fn responses_message(answer: &Json) -> Json {
                 Some("function_call") => {
                     let arguments = item["arguments"]
                         .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| item["arguments"].to_string());
+                        .map_or_else(|| item["arguments"].to_string(), str::to_owned);
                     calls.push(json!({
                         "id": item["call_id"].as_str().or_else(|| item["id"].as_str()).unwrap_or("codex_call"),
                         "type": "function",
@@ -2394,6 +2389,32 @@ mod tests {
         assert!((c.speech_speed - 1.2).abs() < f64::EPSILON);
         assert_eq!(c.local_speech, "127.0.0.1:10200");
         assert_eq!(c.local_listen, "127.0.0.1:10300");
+    }
+
+    #[tokio::test]
+    async fn a_local_speech_model_works_without_an_api_key() {
+        let (url, task) = crate::llm::tests::fake_http(200, b"ID3fake-mp3").await;
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        let config: Config = serde_json::from_value(json!({
+            "base_url": url,
+            "speech_model": "local-tts",
+            "local_speech": "",
+        }))
+        .unwrap();
+        let moli = Assistant::new(hub, None, None, None, config).unwrap();
+
+        assert_eq!(moli.status()["speak"], true);
+        let spoken = moli.speak("Bonsoir", None).await.unwrap();
+
+        assert_eq!(spoken.audio, b"ID3fake-mp3");
+        assert_eq!(spoken.engine, "cloud");
+        let request = task.await.unwrap();
+        assert!(request.starts_with("POST /v1/audio/speech "), "{request}");
+        assert!(request.contains("\"model\":\"local-tts\""), "{request}");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "{request}"
+        );
     }
 
     #[test]

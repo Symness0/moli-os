@@ -196,6 +196,37 @@ mod tests {
         assert_eq!(output_text(&json!({ "output": [] })), "");
     }
 
+    #[tokio::test]
+    async fn a_search_accepts_the_json_response_used_by_api_key_providers() {
+        let (url, task) = crate::llm::tests::fake_http(
+            200,
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"Le match commence à 21 h."}]}],"usage":{"input_tokens":17,"output_tokens":3}}"#.as_bytes(),
+        )
+        .await;
+        let endpoint = Endpoint::parse(&url).unwrap();
+        let auth = RequestAuth::ApiKey(Some("sk-test"));
+
+        let (answer, usage) = search(
+            &endpoint,
+            &auth,
+            "gpt-4.1-mini",
+            "Europe/Paris",
+            "Quand commence le match ?",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(answer["answer"], "Le match commence à 21 h.");
+        assert_eq!(usage["input_tokens"], 17);
+        let request = task.await.unwrap();
+        assert!(request.starts_with("POST /v1/responses "), "{request}");
+        assert!(request.contains("web_search"), "{request}");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "{request}"
+        );
+    }
+
     #[test]
     fn a_search_asks_for_the_web_tool_where_the_house_is() {
         let body = request(

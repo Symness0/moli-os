@@ -112,6 +112,7 @@
   "moli.reglages.codex_erreur": "La connexion n’a pas abouti. Réessaie.",
   "moli.reglages.auth_api": "Utiliser la clé API",
   "moli.reglages.auth_codex": "Utiliser ChatGPT Codex",
+  "moli.reglages.auth_local": "Utiliser le modèle local",
   "moli.reglages.auth_erreur": "Impossible de changer le mode de connexion.",
   "moli.reglages.code": "ton code",
   "moli.reglages.remplacer": "Remplacer la clé",

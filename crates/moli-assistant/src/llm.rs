@@ -80,13 +80,7 @@ impl Endpoint {
         accept: &str,
         body: Vec<u8>,
     ) -> anyhow::Result<Request<Full<Bytes>>> {
-        self.request_with_auth(
-            &RequestAuth::ApiKey(key),
-            tail,
-            content_type,
-            accept,
-            body,
-        )
+        self.request_with_auth(&RequestAuth::ApiKey(key), tail, content_type, accept, body)
     }
 
     fn request_with_auth(
@@ -339,8 +333,7 @@ impl Endpoint {
             .header("content-type", content_type)
             .header("accept", "application/json")
             .body(Full::new(Bytes::from(body)))?;
-        moli_net::web(&self.host, self.port, self.tls, request, limit, 64 * 1024)
-            .await
+        moli_net::web(&self.host, self.port, self.tls, request, limit, 64 * 1024).await
     }
 
     /// Speech to text (`/audio/transcriptions`), in the house's language.
@@ -402,6 +395,16 @@ impl Endpoint {
 /// `MAX_ANSWER`, then reduced to the completed response for the existing
 /// deterministic tool loop.
 fn completed_response(host: &str, answer: &[u8]) -> anyhow::Result<Json> {
+    if answer
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        == Some(b'{')
+    {
+        return serde_json::from_slice(answer)
+            .with_context(|| format!("{host}: invalid Responses API JSON"));
+    }
+
     let text = String::from_utf8_lossy(answer);
     let mut data = String::new();
     let mut response = None;

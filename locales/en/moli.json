@@ -112,6 +112,7 @@
   "moli.reglages.codex_erreur": "Sign-in did not complete. Try again.",
   "moli.reglages.auth_api": "Use API key",
   "moli.reglages.auth_codex": "Use ChatGPT Codex",
+  "moli.reglages.auth_local": "Use local model",
   "moli.reglages.auth_erreur": "Could not change the sign-in method.",
   "moli.reglages.code": "your PIN",
   "moli.reglages.remplacer": "Replace the key",

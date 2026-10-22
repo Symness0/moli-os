@@ -93,8 +93,11 @@ impl std::fmt::Debug for LoginState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoginState")
             .field("phase", &self.phase)
-            .field("device_code", &self.user_code.as_ref().map(|_| "<redacted>"))
-            .finish()
+            .field(
+                "device_code",
+                &self.user_code.as_ref().map(|_| "<redacted>"),
+            )
+            .finish_non_exhaustive()
     }
 }
 
@@ -103,7 +106,10 @@ struct UserCodeResponse {
     device_auth_id: String,
     #[serde(alias = "usercode")]
     user_code: String,
-    #[serde(default = "default_interval", deserialize_with = "deserialize_interval")]
+    #[serde(
+        default = "default_interval",
+        deserialize_with = "deserialize_interval"
+    )]
     interval: u64,
 }
 
@@ -160,14 +166,11 @@ impl Assistant {
             state.phase = LoginPhase::Starting;
         }
 
-        let device = match request_device_code().await {
-            Ok(device) => device,
-            Err(()) => {
-                self.0.codex_login.lock().await.phase = LoginPhase::Failed;
-                return Err(AssistantError::Upstream(moli_i18n::tr!(
-                    "assistant.settings.codex_login_failed"
-                )));
-            }
+        let Ok(device) = request_device_code().await else {
+            self.0.codex_login.lock().await.phase = LoginPhase::Failed;
+            return Err(AssistantError::Upstream(moli_i18n::tr!(
+                "assistant.settings.codex_login_failed"
+            )));
         };
 
         {
@@ -175,9 +178,10 @@ impl Assistant {
             state.phase = LoginPhase::Waiting;
             state.verification_url = Some("https://auth.openai.com/codex/device".into());
             state.user_code = Some(device.user_code.clone());
-            state.expires_at = Some(unix_seconds().saturating_add(
-                i64::try_from(DEVICE_LIFETIME.as_secs()).unwrap_or(i64::MAX),
-            ));
+            state.expires_at = Some(
+                unix_seconds()
+                    .saturating_add(i64::try_from(DEVICE_LIFETIME.as_secs()).unwrap_or(i64::MAX)),
+            );
         }
         let user_code = device.user_code.clone();
         let interval = device.interval.as_secs();
@@ -205,7 +209,9 @@ impl Assistant {
 
     pub fn codex_login_status(&self) -> Json {
         let state = self.0.codex_login.try_lock().ok();
-        let phase = state.as_ref().map_or(LoginPhase::Waiting, |state| state.phase);
+        let phase = state
+            .as_ref()
+            .map_or(LoginPhase::Waiting, |state| state.phase);
         json!({
             "phase": match phase {
                 LoginPhase::Idle => "idle",
@@ -263,7 +269,10 @@ impl Assistant {
                 .0
                 .hub
                 .secret(&InstanceId::from("assistant"), "api_key")
-                .is_some() => "api_key",
+                .is_some() =>
+            {
+                "api_key"
+            }
             _ if self.read_tokens().is_some() => "codex",
             _ if self.0.endpoint.is_local() => "local",
             _ => "none",
@@ -285,9 +294,7 @@ impl Assistant {
                         .then_some(AssistantAuth::ApiKey(None))
                 })
                 .ok_or_else(|| {
-                    AssistantError::NotConfigured(moli_i18n::tr!(
-                        "assistant.settings.key_missing"
-                    ))
+                    AssistantError::NotConfigured(moli_i18n::tr!("assistant.settings.key_missing"))
                 }),
             "local" => Ok(AssistantAuth::ApiKey(None)),
             _ => Err(AssistantError::NotConfigured(moli_i18n::tr!(
@@ -313,18 +320,14 @@ impl Assistant {
         tokio::spawn(async move { assistant.refresh_codex_tokens().await })
             .await
             .map_err(|_| {
-                AssistantError::Upstream(moli_i18n::tr!(
-                    "assistant.settings.codex_reconnect"
-                ))
+                AssistantError::Upstream(moli_i18n::tr!("assistant.settings.codex_reconnect"))
             })?
     }
 
     async fn refresh_codex_tokens(&self) -> Result<CodexTokens, AssistantError> {
         let _refresh = self.0.codex_refresh.lock().await;
         let mut tokens = self.read_tokens().ok_or_else(|| {
-            AssistantError::NotConfigured(moli_i18n::tr!(
-                "assistant.settings.codex_reconnect"
-            ))
+            AssistantError::NotConfigured(moli_i18n::tr!("assistant.settings.codex_reconnect"))
         })?;
         let now = unix_seconds();
         if tokens.expires_at > now + REFRESH_SKEW {
@@ -390,10 +393,7 @@ impl Assistant {
             return Err(());
         }
         let response: TokenResponse = serde_json::from_slice(&answer).map_err(|_| ())?;
-        let account_id = response
-            .id_token
-            .as_deref()
-            .and_then(account_id);
+        let account_id = response.id_token.as_deref().and_then(account_id);
         if response.access_token.trim().is_empty() {
             return Err(());
         }
@@ -401,7 +401,10 @@ impl Assistant {
         let tokens = CodexTokens {
             expires_at: token_expiry(response.expires_in, Some(&response.access_token), now),
             access_token: response.access_token,
-            refresh_token: response.refresh_token.filter(|value| !value.is_empty()).ok_or(())?,
+            refresh_token: response
+                .refresh_token
+                .filter(|value| !value.is_empty())
+                .ok_or(())?,
             account_id,
         };
         self.store_tokens(&tokens).await.map_err(|_| ())?;
@@ -414,8 +417,8 @@ impl Assistant {
     }
 
     async fn store_tokens(&self, tokens: &CodexTokens) -> Result<(), AssistantError> {
-        let value = serde_json::to_string(tokens)
-            .map_err(|e| AssistantError::Upstream(e.to_string()))?;
+        let value =
+            serde_json::to_string(tokens).map_err(|e| AssistantError::Upstream(e.to_string()))?;
         self.0
             .hub
             .store_secret(&InstanceId::from("assistant"), TOKEN_SECRET, &value)
@@ -473,12 +476,7 @@ async fn poll_device_token(device: DeviceCode) -> Result<DeviceAuthorization, ()
         })
         .map_err(|_| ())?;
         let (status, answer) = endpoint
-            .post_raw(
-                "/deviceauth/token",
-                "application/json",
-                body,
-                REQUEST_LIMIT,
-            )
+            .post_raw("/deviceauth/token", "application/json", body, REQUEST_LIMIT)
             .await
             .map_err(|_| ())?;
         if status.is_success() {
@@ -491,7 +489,7 @@ async fn poll_device_token(device: DeviceCode) -> Result<DeviceAuthorization, ()
         if elapsed >= DEVICE_LIFETIME {
             return Err(());
         }
-        tokio::time::sleep(device.interval.min(DEVICE_LIFETIME - elapsed)).await;
+        tokio::time::sleep(device.interval.min(DEVICE_LIFETIME.saturating_sub(elapsed))).await;
     }
 }
 
@@ -554,7 +552,11 @@ fn token_expiry(expires_in: Option<u64>, token: Option<&str>, now: i64) -> i64 {
         .and_then(|payload| serde_json::from_slice::<Json>(&payload).ok())
         .and_then(|claims| claims["exp"].as_i64());
     from_claim
-        .or_else(|| expires_in.and_then(|duration| i64::try_from(duration).ok()).and_then(|duration| now.checked_add(duration)))
+        .or_else(|| {
+            expires_in
+                .and_then(|duration| i64::try_from(duration).ok())
+                .and_then(|duration| now.checked_add(duration))
+        })
         .unwrap_or_else(|| now.saturating_add(3_600))
 }
 
@@ -563,4 +565,56 @@ fn unix_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_local_model_can_be_selected_after_codex_login() {
+        let dir = std::env::temp_dir().join(format!("moli-codex-provider-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions {
+            secrets: Some((
+                dir.join("secrets.json"),
+                moli_runtime::MasterKey::generate().unwrap(),
+            )),
+            ..moli_runtime::HubOptions::default()
+        })
+        .unwrap();
+        let tokens = CodexTokens {
+            access_token: "test-access-token".into(),
+            refresh_token: "test-refresh-token".into(),
+            expires_at: unix_seconds().saturating_add(3_600),
+            account_id: None,
+        };
+        let tokens = serde_json::to_string(&tokens).unwrap();
+        hub.store_secret(&InstanceId::from("assistant"), MODE_SECRET, "codex")
+            .await
+            .unwrap();
+        hub.store_secret(&InstanceId::from("assistant"), TOKEN_SECRET, &tokens)
+            .await
+            .unwrap();
+        let config: crate::Config = serde_json::from_value(serde_json::json!({
+            "base_url": "http://127.0.0.1:11434/v1",
+        }))
+        .unwrap();
+        let assistant = Assistant::new(hub, None, None, None, config).unwrap();
+
+        assert_eq!(assistant.settings()["provider"], "codex");
+        assert_eq!(assistant.settings()["codex"], true);
+        assert_eq!(assistant.settings()["local_model"], true);
+        let selected = assistant.use_auth_provider("local").await.unwrap();
+        assert_eq!(selected["provider"], "local");
+        assert_eq!(assistant.settings()["provider"], "local");
+        assert!(matches!(
+            assistant.auth_for_request().await.unwrap(),
+            AssistantAuth::ApiKey(None)
+        ));
+
+        drop(assistant);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
